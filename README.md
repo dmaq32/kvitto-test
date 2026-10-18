@@ -1,20 +1,47 @@
-# Kvitto Payments API
+# Kvitto — Payments API
 
-API приёма оплаты курса (тестовое задание Junior Python / FastAPI).
+Тестовое задание Junior Python (FastAPI): приём оплаты курса, рассрочка, вебхук банка.
 
-## Запуск (Docker)
+Как работал с ИИ — в [`AI_LOG.md`](AI_LOG.md).
+
+## Что есть
+
+| Метод | Путь | Зачем |
+|-------|------|--------|
+| `GET` | `/tariffs` | список тарифов |
+| `POST` | `/payments` | создать платёж (`Idempotency-Key` обязателен) |
+| `GET` | `/payments` | список, фильтры `email` / `status` |
+| `GET` | `/payments/{id}` | один платёж |
+| `POST` | `/webhooks/bank` | статус от банка + HMAC (`X-Signature`) |
+
+Коротко по правилам из ТЗ:
+
+- суммы в **копейках** (`int`)
+- промо `KVITTO10` → −10%, регистр не важен
+- рассрочка: остаток копеек уходит в первые платежи (`1990000` / 3 → `[663334, 663333, 663333]`)
+- повтор с тем же `Idempotency-Key` → тот же платёж, статус **200**
+- запрещённый переход статуса → **409**, запись не меняется
+
+Swagger после запуска: http://localhost:8000/docs
+
+## Быстрый старт
 
 ```bash
-cp .env.example .env   # поправь пароль при необходимости
+cp .env.example .env
 docker compose up --build
 ```
 
-- API: http://localhost:8000  
-- Docs: http://localhost:8000/docs  
+Поднимается Postgres и API. Миграции крутятся при старте контейнера `api`.
 
-Миграции применяются при старте контейнера `api`.
+Проверка:
 
-## Локальный запуск
+```bash
+curl http://localhost:8000/tariffs
+```
+
+## Локально (без контейнера API)
+
+Нужен Python 3.12+ и Postgres (можно только БД из compose):
 
 ```bash
 docker compose up -d postgres
@@ -28,13 +55,15 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Для тестов один раз создай БД `kvitto_test`:
+## Тесты
+
+Один раз создать тестовую БД:
 
 ```bash
-docker exec -it kvitto-test-postgres-1 psql -U postgres -c "CREATE DATABASE kvitto_test;"
+docker exec kvitto-test-postgres-1 psql -U postgres -c "CREATE DATABASE kvitto_test;"
 ```
 
-## Тесты и линтер
+Дальше:
 
 ```bash
 source .venv/bin/activate
@@ -42,25 +71,42 @@ ruff check app tests
 pytest
 ```
 
-CI (GitHub Actions) гоняет `ruff` и `pytest` на каждый push/PR.
+## Примеры запросов
 
-## Примеры
+Тарифы:
 
 ```bash
-# тарифы
 curl http://localhost:8000/tariffs
+```
 
-# платёж
+Платёж с промо:
+
+```bash
 curl -X POST http://localhost:8000/payments \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-1' \
   -d '{"tariff_id":"standard","email":"user@example.com","method":"card","promo_code":"KVITTO10"}'
+```
 
-# вебхук (X-Signature = HMAC-SHA256 тела с WEBHOOK_SECRET)
-BODY='{"payment_id":"<uuid>","status":"succeeded"}'
-SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')
-curl -X POST http://localhost:8000/webhooks/bank \
-  -H 'Content-Type: application/json' \
+Вебхук — подставь `id` из ответа платежа (секрет как в `.env.example`):
+
+```bash
+PAYMENT_ID="uuid-из-ответа"
+BODY="{\"payment_id\":\"${PAYMENT_ID}\",\"status\":\"succeeded\"}"
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "dev-webhook-secret" | awk '{print $2}')
+curl -sS -X POST http://localhost:8000/webhooks/bank \
+  -H "Content-Type: application/json" \
   -H "X-Signature: $SIG" \
   -d "$BODY"
 ```
+
+## CI
+
+На каждый push и pull request GitHub Actions (`.github/workflows/ci.yml`):
+
+1. поднимает Postgres;
+2. ставит зависимости;
+3. гоняет `ruff check app tests`;
+4. создаёт БД `kvitto_test`;
+5. применяет миграции (`alembic upgrade head`);
+6. запускает `pytest`.
